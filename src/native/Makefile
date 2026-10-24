@@ -40,6 +40,13 @@ RECOMP_EXTRA := $(if $(filter 1,$(TSO)),-DRECOMP_TSO)
 # the installed deps without a DXVK checkout; nonexistent -I directories are ignored.
 DEP_INCLUDES := -I$(DEPS)/include -I$(DEPS)/include/dxvk -I$(DEPS)/include/dxvk/wsi
 LDFLAGS := -shared -Wl,-Bsymbolic -static-libstdc++ -Wl,--no-undefined -L$(DEPS)/lib -ldxvk_d3d9 -lFAudio -lSDL2 -llog -landroid
+# Opt-in ThinLTO (make ... LTO=1): cross-file optimization between the runtime and the recompiled code, usually
+# a smaller .text, at the cost of a much longer link. Off by default: the changed code layout can also cost
+# icache locality, so keep it only if a device measurement says it helps (CI smoke-builds it to keep it working).
+ifeq ($(LTO),1)
+TARGET_FLAGS += -flto=thin
+LDFLAGS += -flto=thin
+endif
 # Adreno: Turnip and libadrenotools from android/build-turnip.sh (arm64 only; built without them otherwise).
 TURNIP ?= $(HOME)/proto-re-data/android-turnip
 ifneq ($(and $(filter arm64-v8a,$(ABI)),$(wildcard $(TURNIP)/lib/libadrenotools.a)),)

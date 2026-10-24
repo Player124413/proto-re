@@ -400,6 +400,20 @@ jobs:
           ls -lh "build/android/$ABI/libmain.so"
           file "build/android/$ABI/libmain.so"
 
+      - name: ThinLTO smoke build (stub only, keeps LTO=1 working)
+        if: needs.preflight.outputs.mode == 'stub'
+        run: |
+          set -euo pipefail
+          make -C src/native PLATFORM=android ABI="$ABI" -j"$(nproc)" LTO=1 \
+              NDK="$ANDROID_NDK_HOME" \
+              DEPS="$PWD/deps/$ABI" \
+              TURNIP="$PWD/turnip" \
+              RECOMP_DIR="$PWD/build/recomp/native" \
+              OUT="$PWD/build/android-lto/$ABI"
+          test -f "build/android-lto/$ABI/libmain.so"
+          ls -lh "build/android/$ABI/libmain.so" "build/android-lto/$ABI/libmain.so"
+          file "build/android-lto/$ABI/libmain.so"
+
       - name: Package the APK
         run: |
           set -euo pipefail

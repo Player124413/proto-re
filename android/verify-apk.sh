@@ -55,8 +55,8 @@ target_sdk=$(badge_num 'targetSdkVersion')
 [ "$target_sdk" = 35 ] ||
     fail "unexpected targetSdkVersion '$target_sdk' (want 35); badging starts: $(head -n 3 <<<"$BADGING" | tr '\n' ' ')"
 badge_line 'native-code:' | grep -q "'$ABI'" || fail "native-code does not include $ABI: $(badge_line 'native-code:')"
-badge_line 'launchable-activity:' | grep -q 'com.protore.game.ProtoActivity' ||
-    fail "ProtoActivity is not the launchable activity: $(badge_line 'launchable-activity:')"
+badge_line 'launchable-activity:' | grep -q 'com.protore.game.SetupActivity' ||
+    fail "SetupActivity (the first-launch screen) is not the launchable activity: $(badge_line 'launchable-activity:')"
 ok "manifest badging (minSdk $min_sdk, targetSdk $target_sdk)"
 
 # 3. Contents: everything the game needs, and never any game data.
@@ -116,6 +116,7 @@ else
     echo "verify-apk: note: no readelf in PATH, skipping dependency check"
 fi
 
+grep -a -q 'com/protore/game/SetupActivity' "$TMP/classes.dex" || fail "SetupActivity missing from classes.dex"
 grep -a -q 'com/protore/game/ProtoActivity' "$TMP/classes.dex" || fail "ProtoActivity missing from classes.dex"
 grep -a -q 'org/libsdl/app/SDLActivity' "$TMP/classes.dex" || fail "SDLActivity missing from classes.dex"
 ok "dex classes"

@@ -15,8 +15,11 @@ Runs on the phone: menus, videos, sound, missions, saves. A full playthrough is 
 - touch controls with a layout editor, camera sensitivity, invert Y, vibration
 - gamepad
 - Mali uses the system Vulkan driver, Adreno uses Turnip (Mesa) through libadrenotools
-- settings in game: render resolution, textures, FPS limit, battery saver
-- ADPF hints so the phone doesn't run the CPU at max all the time
+- settings in game: render resolution, textures, FPS limit, battery saver, stick dead zone
+- ADPF hints so the phone doesn't run the CPU at max all the time, plus a thermal guard that steps the FPS
+  limit down (45, then 30) when the device reports thermal pressure and lifts it again as it cools
+- first-launch setup screen: checks the copied game files, picks a conservative quality preset for the
+  device, backs up the saves (last 5 in `files/backups`) whenever they change
 
 Pixel 6 (Mali-G78): menus 60 fps, gameplay 38-46 at 720p and 33-42 at 1080p. Gameplay is CPU bound right now.
 A phone with Adreno 735: about 40 fps on average at 720p.
@@ -24,22 +27,23 @@ A phone with Adreno 735: about 40 fps on average at 720p.
 ## TODO
 
 - 60 fps at 1080p. Mostly CPU work: rewrite the hot functions of the main/render threads by hand, cut down
-  D3D9 buffer locking, try LTO/PGO. Later maybe 30 Hz sim with interpolated 60 Hz rendering and FSR/ASR upscaling.
-- auto quality presets on first launch, built-in benchmark
+  D3D9 buffer locking, PGO (ThinLTO builds with `LTO=1`; whether it helps needs on-device numbers). Later
+  maybe 30 Hz sim with interpolated 60 Hz rendering and FSR/ASR upscaling.
+- built-in benchmark so the first-launch quality preset is picked by measurement, not just by RAM size;
+  dynamic resolution from thermal headroom instead of only stepping the FPS limit down
 - ASTC/ETC2 textures, less heat and battery drain
 - controls: context buttons in fights (grab/throw, consume, shield), swipe wheel for powers and disguises,
-  target lock on the nearest enemy, separate layouts for helicopter/tank, stick dead zone
+  target lock on the nearest enemy, separate layouts for helicopter/tank
 - test on real Adreno phones and weaker Mali (G57/G68)
 - GLES 3.0 fallback for phones with bad Vulkan drivers
-- first launch screen to pick the game folder and check files
 - language switch in settings, audio overlay support in case a Russian dub ever shows up
-- save backups
 
 ## Installing
 
 Android 10+, arm64, and a bought copy of the game (PC, Steam app 10150, build 19788432).
 
-1. Install `prototype.apk` and start it once so it creates its folder.
+1. Install `prototype.apk` and open it: the setup screen creates its folder, shows the game folder path
+   and checks off the files as they appear.
 2. Copy `prototypeenginef.dll`, all `.rcf` and `.p3d` files and the `art`, `audio`, `scripts` folders to
    `/sdcard/Android/data/com.protore.game/files/game/`. For Russian, use the `.rcf` files with the translation applied.
 3. Optionally put `protore.ini` in `/sdcard/Android/data/com.protore.game/files/`
