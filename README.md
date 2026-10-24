@@ -50,6 +50,11 @@ Android 10+, arm64, and a bought copy of the game (PC, Steam app 10150, build 19
 3. Optionally put `protore.ini` in `/sdcard/Android/data/com.protore.game/files/`
    (see [android/protore.ini.example](android/protore.ini.example)). It has to be readable, `chmod 666`.
 
+Every build is signed with the same committed debug keystore (`android/debug.keystore`) and CI stamps
+an increasing version code, so a newer APK installs over the old one like a normal update and keeps the
+game files and saves. Only when coming from an older CI build (signed with a throwaway per-run key) do
+you have to uninstall once.
+
 Logs go to the same folder (`proto-native.log`, `app_process64_d3d9.log`) and to `adb logcat -s protore`.
 
 `protore.ini` keys:

@@ -50,6 +50,11 @@ Android 10+, arm64 и купленная игра (PC, Steam app 10150, сбор
 3. По желанию положить `protore.ini` в `/sdcard/Android/data/com.protore.game/files/`
    (пример: [android/protore.ini.example](android/protore.ini.example)). Нужны права на чтение, `chmod 666`.
 
+Все сборки подписаны одним и тем же отладочным keystore из репозитория (`android/debug.keystore`), а CI
+проставляет растущий код версии, поэтому новый APK ставится поверх старого как обычное обновление —
+файлы игры и сохранения не теряются. Удалить приложение вручную придётся только один раз, при переходе
+со старой CI-сборки, подписанной одноразовым ключом раннера.
+
 Логи там же (`proto-native.log`, `app_process64_d3d9.log`) и в `adb logcat -s protore`.
 
 Ключи `protore.ini`:

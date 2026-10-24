@@ -15,8 +15,11 @@
 #    SHA-256 (engine_sha256 input or PROTORE_ENGINE_SHA256 secret) to verify the download. The DLL and the
 #    generated C never leave the runner and are deleted before the upload: the only artifact is the APK.
 #
-# Game data (RCF/P3D/...) is never part of the APK. Signing uses a debug key generated on the runner,
-# same as a local android/build-apk.sh run.
+# Game data (RCF/P3D/...) is never part of the APK. Signing uses the committed android/debug.keystore
+# (a public debug key, not a release key) and the packaging step stamps an ever-increasing versionCode:
+# every build has the same signature, so a new APK installs over the old one - uninstalling (which wipes
+# the copied game files and saves) is only needed once, when coming from a build signed by the old
+# throwaway per-runner key.
 name: android-apk
 
 on:
@@ -478,7 +481,11 @@ jobs:
           export PLATFORM_JAR="$ANDROID_HOME/platforms/$ANDROID_PLATFORM/android.jar"
           export DEPS_ROOT="$PWD/deps"
           export TURNIP_ROOT="$PWD/turnip"
-          export KEYSTORE="$RUNNER_TEMP/debug.keystore"   # created by build-apk.sh when missing
+          # Committed debug keystore: one signature for every build, so APKs update in place.
+          export KEYSTORE="$PWD/android/debug.keystore"
+          export VERSION_CODE="$(date -u +%s)"   # epoch seconds: always newer than the last build
+          export VERSION_NAME="0.1-ci.${GITHUB_RUN_NUMBER}.${GITHUB_SHA:0:7}"
+          echo "package version: versionCode=$VERSION_CODE versionName=$VERSION_NAME"
           android/build-apk.sh "$ABI"
 
       - name: Verify the APK
@@ -505,6 +512,8 @@ jobs:
           ls -lh dist
           sha=$(cut -d ' ' -f 1 "dist/$name.sha256")
           size=$(du -h "dist/$name" | cut -f 1)
+          signer=$("$ANDROID_HOME/build-tools/$BUILD_TOOLS_VERSION/apksigner" verify --print-certs "dist/$name" | sed -n 's/.*certificate SHA-256 digest: //p' | head -n 1)
+          [ -n "$signer" ] || signer=unknown
           {
               echo ""
               echo "### APK artifact"
@@ -512,6 +521,8 @@ jobs:
               echo "| file | size | sha256 |"
               echo "|---|---|---|"
               echo "| \`$name\` | $size | \`$sha\` |"
+              echo ""
+              echo "Signing certificate SHA-256: \`$signer\` - the same for every build, so this APK installs as an update over the previous one (game files and saves are kept)."
               if [ "$MODE" = stub ]; then
                   echo ""
                   echo "> Stub APK: pipeline check only, no game code inside, not playable."
