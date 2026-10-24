@@ -16,7 +16,7 @@ fail() {
     echo "verify-apk: FAIL: $*" >&2
     # In GitHub Actions, surface the reason as an annotation too (visible in the run header/API, not
     # only buried in the log).
-    [ "${GITHUB_ACTIONS:-}" = true ] && echo "::error title=verify-apk::FAIL: $*" >&2
+    [ "${GITHUB_ACTIONS:-}" = true ] && echo "::error title=verify-apk::FAIL: $*"
     exit 1
 }
 ok() { echo "verify-apk: ok: $*"; }
@@ -41,15 +41,23 @@ ok "signature"
 "$BUILD_TOOLS/zipalign" -c -P 16 4 "$APK" || fail "zipalign check (-P 16) failed"
 ok "zipalign"
 
-# 2. Manifest as packaged.
+# 2. Manifest as packaged. Badging formats differ between aapt2 versions (quotes/spacing, sdkVersion vs
+# minSdkVersion), so values are parsed rather than matched literally.
 BADGING=$("$BUILD_TOOLS/aapt2" dump badging "$APK")
+badge_line() { grep -E "^$1" <<<"$BADGING" | head -n 1 || true; }
+badge_num() { badge_line "$1" | grep -oE '[0-9]+' | head -n 1 || true; }
 grep -q "^package: name='com.protore.game'" <<<"$BADGING" || fail "unexpected package name in badging"
-grep -q "^sdkVersion:'26'" <<<"$BADGING" || fail "unexpected minSdkVersion (want 26)"
-grep -q "^targetSdkVersion:'35'" <<<"$BADGING" || fail "unexpected targetSdkVersion (want 35)"
-grep -q "native-code: '$ABI'" <<<"$BADGING" || fail "native-code does not include $ABI"
-grep -q "launchable-activity: name='com.protore.game.ProtoActivity'" <<<"$BADGING" ||
-    fail "ProtoActivity is not the launchable activity"
-ok "manifest badging"
+min_sdk=$(badge_num 'sdkVersion')
+[ -n "$min_sdk" ] || min_sdk=$(badge_num 'minSdkVersion')
+[ "$min_sdk" = 26 ] ||
+    fail "unexpected minSdkVersion '$min_sdk' (want 26); badging starts: $(head -n 3 <<<"$BADGING" | tr '\n' ' ')"
+target_sdk=$(badge_num 'targetSdkVersion')
+[ "$target_sdk" = 35 ] ||
+    fail "unexpected targetSdkVersion '$target_sdk' (want 35); badging starts: $(head -n 3 <<<"$BADGING" | tr '\n' ' ')"
+badge_line 'native-code:' | grep -q "'$ABI'" || fail "native-code does not include $ABI: $(badge_line 'native-code:')"
+badge_line 'launchable-activity:' | grep -q 'com.protore.game.ProtoActivity' ||
+    fail "ProtoActivity is not the launchable activity: $(badge_line 'launchable-activity:')"
+ok "manifest badging (minSdk $min_sdk, targetSdk $target_sdk)"
 
 # 3. Contents: everything the game needs, and never any game data.
 LIST=$(unzip -Z1 "$APK")
