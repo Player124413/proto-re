@@ -30,6 +30,20 @@
         <!-- profiling with simpleperf without root -->
         <profileable android:shell="true" />
 
+        <!-- First-launch screen: file checks, quality preset, save backups; starts ProtoActivity. -->
+        <activity
+            android:name="com.protore.game.SetupActivity"
+            android:label="Prototype"
+            android:exported="true"
+            android:theme="@android:style/Theme.DeviceDefault.NoActionBar"
+            android:configChanges="layoutDirection|locale|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- The game itself (SDL). Kept exported so `am start` can still launch it directly in development. -->
         <activity
             android:name="com.protore.game.ProtoActivity"
             android:label="Prototype"
@@ -38,11 +52,6 @@
             android:alwaysRetainTaskState="true"
             android:launchMode="singleInstance"
             android:configChanges="layoutDirection|locale|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation"
-            android:preferMinimalPostProcessing="true">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-        </activity>
+            android:preferMinimalPostProcessing="true" />
     </application>
 </manifest>

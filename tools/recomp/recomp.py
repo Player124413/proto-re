@@ -117,6 +117,9 @@ def flag_sets(ins):
 
 EXTRA_ENTRIES = set()  # filled by load_functions
 THUNKS = set()  # thunk entries (functions.csv), filled by load_functions
+REAL_ENTRIES = set()  # non-thunk entries (functions.csv): the functions the "no unsupported instructions"
+                      # guarantee is about. Thunk/extra candidates are partly heuristic (data_entries.py
+                      # false positives decode data as code), so the summary counts them separately.
 
 
 def rebase(new_base):
@@ -162,6 +165,8 @@ def load_functions():
             va = int(p[0], 16) - ORIG_BASE + BASE
             starts.append(va)
             sizes[va] = int(p[1])
+            if p[2] == "false":
+                REAL_ENTRIES.add(va)
             if p[2] != "false":
                 # Ghidra's "thunks" include this-adjusting stubs (mov ecx, [..]; add ecx, n; jmp f): compiled like
                 # any function, but left native by the in-process bridge (EXTRA_ENTRIES are not patched).
@@ -1508,6 +1513,8 @@ def main():
     md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_32)
     md.detail = True
     unsupported = collections.Counter()
+    unsupported_real = collections.Counter()
+    unsupported_other = collections.Counter()
     funcs = []
     patches = []
     compiled = {va for va in vas if va in sizes}
@@ -1539,6 +1546,7 @@ def main():
                 work.append(t)
                 discovered += 1
         unsupported.update(fc.unsupported)
+        (unsupported_real if va in REAL_ENTRIES else unsupported_other).update(fc.unsupported)
         # Missed entries are only reachable through computed calls; the in-process bridge leaves them native.
         patch = entry_patch(fc) if va not in EXTRA_ENTRIES else None
         if patch:
@@ -1546,12 +1554,20 @@ def main():
     funcs.sort()
     patches.sort()
     print(f"{discovered} entries discovered as direct call/jump targets", file=sys.stderr)
+    real_count = sum(1 for va, _ in funcs if va in REAL_ENTRIES)
     if args.split:
         parts = write_split(args.out, funcs, patches, args.split)
-        print(f"{len(funcs)} functions in {parts} files; {len(patches)} enterable from native code; "
-              f"{sum(unsupported.values())} unsupported instructions")
+        print(f"{len(funcs)} functions in {parts} files ({real_count} real, {len(funcs) - real_count} "
+              f"thunk/extra/discovered); {len(patches)} enterable from native code; "
+              f"{sum(unsupported.values())} unsupported instructions "
+              f"({sum(unsupported_real.values())} in real functions, "
+              f"{sum(unsupported_other.values())} in thunk/extra entries)")
         for k, v in unsupported.most_common(30):
             print(f"  {v:6d}  {k}")
+        if unsupported_real:
+            print("unsupported in real functions:")
+            for k, v in unsupported_real.most_common(30):
+                print(f"  {v:6d}  {k}")
         return
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     with open(args.out, "w") as f:
@@ -1567,9 +1583,15 @@ def main():
             f.write(f"    {{0x{va:08x}u, f_{va:08x}}},\n")
         f.write("};\nconst uint32_t g_recomp_count = sizeof(g_recomp_table) / sizeof(g_recomp_table[0]);\n")
     total = sum(unsupported.values())
-    print(f"{len(funcs)} functions recompiled; {total} unsupported instructions")
+    print(f"{len(funcs)} functions recompiled; {total} unsupported instructions "
+          f"({sum(unsupported_real.values())} in real functions, "
+          f"{sum(unsupported_other.values())} in thunk/extra entries)")
     for k, v in unsupported.most_common(30):
         print(f"  {v:6d}  {k}")
+    if unsupported_real:
+        print("unsupported in real functions:")
+        for k, v in unsupported_real.most_common(30):
+            print(f"  {v:6d}  {k}")
 
 
 if __name__ == "__main__":

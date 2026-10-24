@@ -15,6 +15,8 @@ import android.graphics.Path;
 import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.hardware.input.InputManager;
+import android.os.PowerManager;
+import android.util.Log;
 import android.view.HapticFeedbackConstants;
 import android.os.Build;
 import android.view.InputDevice;
@@ -150,8 +152,11 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
         new Setting("Camera speed", "ui_cam", new String[] {"50%", "75%", "100%", "150%", "200%"},
                 new int[] {50, 75, 100, 150, 200}, false),
         new Setting("Invert Y", "ui_invert", new String[] {"Off", "On"}, new int[] {0, 1}, false),
+        new Setting("Stick dead zone", "ui_stick_deadzone", new String[] {"15%", "30%", "45%"},
+                new int[] {15, 30, 45}, false),
+        new Setting("Thermal guard", "ui_thermal", new String[] {"Off", "On"}, new int[] {0, 1}, false),
     };
-    private static final int[] DEFAULTS = {1, 1, 0, 0, 2, 1, 1, 0, 0, 0, 2, 0};
+    private static final int[] DEFAULTS = {1, 1, 0, 0, 2, 1, 1, 0, 0, 0, 2, 0, 1, 1};
     private boolean panelOpen = false, restartNeeded = false;
     private final RectF panel = new RectF(), restartRect = new RectF(), closeRect = new RectF(),
             layoutRect = new RectF();
@@ -177,6 +182,13 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
 
     // stick
     private float stickHomeX, stickHomeY, stickX, stickY, stickR, knobX, knobY;
+    private float deadZone = 0.3f;  // settings[12], fraction of stickR
+
+    // thermal guard (settings[13]): caps the frame limit while the device reports thermal pressure, so the
+    // frame rate degrades in a step we choose instead of the SoC throttling mid-fight (ADPF thermal guidance).
+    private boolean thermalGuard = true;
+    private int thermalCapFps = 0;   // 0 = no cap
+    private Object thermalListener;  // PowerManager.OnThermalStatusChangedListener (API 29+); Object for API 26-28
     private int stickPointer = -1;
     private final boolean[] dirDown = new boolean[4];  // W A S D
     private boolean stickRun, runButtonHeld, shiftDown;  // Shift comes from the rim of the stick or SPRINT
@@ -259,7 +271,72 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
         autoRun = settings[9].value() != 0;
         camGain = settings[10].value() / 100f;
         invertY = settings[11].value() != 0;
+        deadZone = settings[12].value() / 100f;
+        boolean guard = settings[13].value() != 0;
+        if (guard != thermalGuard) {
+            thermalGuard = guard;
+            // Width is still 0 in the constructor: the JNI call would be too early there, and the native side
+            // starts from protore.ini anyway. Later changes (settings panel) apply immediately.
+            if (getWidth() > 0) applyFpsLimit();
+        }
         layoutButtons(getWidth(), getHeight());
+    }
+
+    // ---- thermal guard: dynamic frame limit from the device thermal status (API 29+) ----
+
+    /** The user's FPS-limit setting, stepped down while the device is under thermal pressure. */
+    private void applyFpsLimit() {
+        int limit = settings[2].value();
+        if (thermalGuard && thermalCapFps > 0) {
+            limit = limit > 0 ? Math.min(limit, thermalCapFps) : thermalCapFps;
+        }
+        nativeSetFpsLimit(limit);
+    }
+
+    private void onThermalStatus(int status) {
+        // PowerManager.THERMAL_STATUS_*: 0 none, 1 light, 2 moderate, 3 severe, 4 critical, 5+ emergency.
+        // Small steps, taken before hard throttling (and never below 30 fps); the cap lifts with the status.
+        int cap = status >= 3 ? 30 : status == 2 ? 45 : 0;
+        if (cap == thermalCapFps) return;
+        thermalCapFps = cap;
+        Log.i("protore", "thermal status " + status + ": fps cap " + (cap == 0 ? "off" : cap));
+        applyFpsLimit();
+    }
+
+    private void registerThermalListener() {
+        if (Build.VERSION.SDK_INT < 29 || thermalListener != null) return;
+        PowerManager pm = (PowerManager) getContext().getSystemService(Context.POWER_SERVICE);
+        if (pm == null) return;
+        PowerManager.OnThermalStatusChangedListener listener = new PowerManager.OnThermalStatusChangedListener() {
+            @Override
+            public void onThermalStatusChanged(int status) {
+                onThermalStatus(status);
+            }
+        };
+        thermalListener = listener;
+        pm.addThermalStatusListener(getContext().getMainExecutor(), listener);
+        onThermalStatus(pm.getCurrentThermalStatus());
+    }
+
+    private void unregisterThermalListener() {
+        if (Build.VERSION.SDK_INT < 29 || thermalListener == null) return;
+        PowerManager pm = (PowerManager) getContext().getSystemService(Context.POWER_SERVICE);
+        if (pm != null) {
+            pm.removeThermalStatusListener((PowerManager.OnThermalStatusChangedListener) thermalListener);
+        }
+        thermalListener = null;
+    }
+
+    @Override
+    protected void onAttachedToWindow() {
+        super.onAttachedToWindow();
+        registerThermalListener();
+    }
+
+    @Override
+    protected void onDetachedFromWindow() {
+        unregisterThermalListener();
+        super.onDetachedFromWindow();
     }
 
     private void loadLayout() {
@@ -441,7 +518,7 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
         }
         knobX = stickX + dx;
         knobY = stickY + dy;
-        float dead = stickR * 0.3f;
+        float dead = stickR * deadZone;
         boolean[] want = {dy < -dead, dx < -dead, dy > dead, dx > dead};
         for (int i = 0; i < 4; i++) {
             if (want[i] != dirDown[i]) {
@@ -676,7 +753,7 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
             s.index = (s.index + delta + s.values.length) % s.values.length;
             prefs.edit().putInt(s.key, s.index).apply();
             buzz();
-            if (s.key.equals("fps_limit")) nativeSetFpsLimit(s.value());  // applies right away
+            if (s.key.equals("fps_limit")) applyFpsLimit();  // applies right away (thermal cap included)
             else if (s.engine) restartNeeded = true;
             if (s.engine) writeEngineSettings();
             applyUiSettings();
