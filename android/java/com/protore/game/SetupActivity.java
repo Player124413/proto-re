@@ -2,17 +2,23 @@ package com.protore.game;
 
 import android.app.Activity;
 import android.app.ActivityManager;
+import android.content.ActivityNotFoundException;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.database.Cursor;
 import android.graphics.Typeface;
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.StatFs;
+import android.provider.DocumentsContract;
 import android.view.View;
+import android.view.WindowManager;
 import android.widget.Button;
 import android.widget.LinearLayout;
+import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -22,6 +28,7 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.FileWriter;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.text.SimpleDateFormat;
@@ -37,8 +44,9 @@ import java.util.concurrent.Executors;
 
 /**
  * First-launch screen: creates the game folder, checks that the files copied from the PC version are really
- * there, picks a conservative quality preset for the device and backs up the saves (the emulated C: drive in
- * native_c/) before the game starts. The game itself still runs in ProtoActivity, unchanged.
+ * there (and can copy them itself from a folder the player picks, through the system file picker), picks a
+ * conservative quality preset for the device and backs up the saves (the emulated C: drive in native_c/)
+ * before the game starts. The game itself still runs in ProtoActivity, unchanged.
  *
  * Quality presets share their storage with the in-game settings panel (TouchControls): engine values go to
  * protore.ini, the matching setting indices go to the "controls" preferences, so the two never fight.
@@ -67,12 +75,15 @@ public class SetupActivity extends Activity {
     private static final int INK = 0xff0b0b0b, RED = 0xffe0261e, TEXT = 0xffe8d6d4, DIM = 0xffa89895;
     private static final String OK = "\u2713 ", NO = "\u2717 ", WARN = "! ";
 
+    private static final int REQ_PICK_GAME_FOLDER = 4101;
+
     private final ExecutorService io = Executors.newSingleThreadExecutor();
     private File baseDir, gameDir, iniFile;
-    private TextView status, presetInfo, backupInfo;
-    private Button play;
+    private TextView status, presetInfo, backupInfo, importStatus;
+    private Button play, importButton;
+    private ProgressBar importProgress;
     private final Button[] presetButtons = new Button[PRESET_NAMES.length];
-    private volatile boolean backupRunning;
+    private volatile boolean backupRunning, importRunning, importCancelled;
     private boolean dllOk;
     private int autoPreset = 1;
     private long totalRamBytes;
@@ -103,7 +114,8 @@ public class SetupActivity extends Activity {
 
     @Override
     protected void onDestroy() {
-        io.shutdown();
+        importCancelled = true;
+        io.shutdownNow();
         super.onDestroy();
     }
 
@@ -144,8 +156,9 @@ public class SetupActivity extends Activity {
 
         add(root, text("PROTOTYPE", 34, RED, true), 0);
         add(root, text("proto-re Android port - setup", 16, DIM, false), 2);
-        add(root, text("1. Copy from your PC copy of the game: prototypeenginef.dll, all .rcf and .p3d files, "
-                + "and the art, audio, scripts folders - into the folder shown below.\n"
+        add(root, text("1. Get the game files in place: tap Choose game folder and pick the PC installation "
+                + "folder (the needed files are copied here automatically), or copy manually into the folder "
+                + "shown below: prototypeenginef.dll, all .rcf and .p3d files, and the art, audio, scripts folders.\n"
                 + "2. Pick a quality preset (it can also be changed in game).\n"
                 + "3. Press Play.", 15, TEXT, false), 14);
 
@@ -153,9 +166,28 @@ public class SetupActivity extends Activity {
         status.setTypeface(Typeface.MONOSPACE);
         add(root, status, 14);
 
+        importButton = button("Choose game folder...", new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                pickGameFolder();
+            }
+        });
+        add(root, importButton, 14);
+        importProgress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        importProgress.setMax(1000);
+        importProgress.setVisibility(View.GONE);
+        add(root, importProgress, 8);
+        importStatus = text("", 13, DIM, false);
+        importStatus.setVisibility(View.GONE);
+        add(root, importStatus, 4);
+
         play = button("Play", new View.OnClickListener() {
             @Override
             public void onClick(View v) {
+                if (importRunning) {
+                    Toast.makeText(SetupActivity.this, "Importing game files...", Toast.LENGTH_SHORT).show();
+                    return;
+                }
                 if (backupRunning) {
                     Toast.makeText(SetupActivity.this, "Backing up saves...", Toast.LENGTH_SHORT).show();
                     return;
@@ -255,7 +287,7 @@ public class SetupActivity extends Activity {
         s.append(String.format(Locale.US, "\nFree space: %.1f GB", fs.getAvailableBytes() / 1073741824f));
         status.setText(s.toString());
 
-        play.setEnabled(dllOk);
+        play.setEnabled(dllOk && !importRunning);
         play.setText(dllOk ? "Play" : "Copy the game files first");
         updatePresetUi();
         updateBackupInfo();
@@ -504,6 +536,280 @@ public class SetupActivity extends Activity {
             }
         });
         for (int i = MAX_BACKUPS; i < backups.size(); i++) deleteRecursive(backups.get(i));
+    }
+
+
+    // ---- import: pick the PC installation folder, copy what the port needs into game/ ----
+
+    private void pickGameFolder() {
+        if (importRunning || gameDir == null) return;
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+        try {
+            startActivityForResult(intent, REQ_PICK_GAME_FOLDER);
+        } catch (ActivityNotFoundException e) {
+            Toast.makeText(this, "No file picker on this device - copy the files manually",
+                    Toast.LENGTH_LONG).show();
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != REQ_PICK_GAME_FOLDER || resultCode != RESULT_OK || data == null
+                || data.getData() == null) {
+            return;
+        }
+        Uri treeUri = data.getData();
+        try {
+            getContentResolver().takePersistableUriPermission(treeUri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        } catch (RuntimeException ignored) {
+            // the temporary grant from the picker is enough for this import
+        }
+        startImport(treeUri);
+    }
+
+    private static final class ChildDoc {
+        String id, name, mime;
+        long size;
+
+        boolean isDir() {
+            return DocumentsContract.Document.MIME_TYPE_DIR.equals(mime);
+        }
+    }
+
+    private static final class CopyItem {
+        final Uri uri;
+        final File dest;
+        final long size;
+
+        CopyItem(Uri uri, File dest, long size) {
+            this.uri = uri;
+            this.dest = dest;
+            this.size = size;
+        }
+    }
+
+    private static boolean safeName(String name) {
+        return !name.isEmpty() && !name.contains("/") && !name.contains("\\")
+                && !name.equals(".") && !name.equals("..");
+    }
+
+    private List<ChildDoc> listChildren(Uri treeUri, String docId) {
+        List<ChildDoc> out = new ArrayList<>();
+        Uri children = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, docId);
+        String[] projection = {
+                DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                DocumentsContract.Document.COLUMN_MIME_TYPE,
+                DocumentsContract.Document.COLUMN_SIZE,
+        };
+        try (Cursor c = getContentResolver().query(children, projection, null, null, null)) {
+            if (c == null) return out;
+            while (c.moveToNext()) {
+                ChildDoc d = new ChildDoc();
+                d.id = c.getString(0);
+                d.name = c.getString(1);
+                d.mime = c.getString(2);
+                d.size = c.isNull(3) ? -1 : c.getLong(3);
+                if (d.id != null && d.name != null && safeName(d.name)) out.add(d);
+            }
+        } catch (RuntimeException e) {
+            // provider died or the grant is gone: report as empty, the summary below will say so
+        }
+        return out;
+    }
+
+    /** The picked folder itself, or a direct subfolder of it, that holds prototypeenginef.dll; null if none. */
+    private String findGameRoot(Uri treeUri, String rootId) {
+        List<ChildDoc> top = listChildren(treeUri, rootId);
+        for (ChildDoc d : top) {
+            if (!d.isDir() && d.name.equalsIgnoreCase("prototypeenginef.dll")) return rootId;
+        }
+        for (ChildDoc dir : top) {
+            if (!dir.isDir()) continue;
+            for (ChildDoc d : listChildren(treeUri, dir.id)) {
+                if (!d.isDir() && d.name.equalsIgnoreCase("prototypeenginef.dll")) return dir.id;
+            }
+        }
+        return null;
+    }
+
+    /** Only what the port reads: the engine DLL, the archives, and the art/audio/scripts trees. */
+    private void collectCopyItems(Uri treeUri, String rootId, List<CopyItem> out) {
+        for (ChildDoc d : listChildren(treeUri, rootId)) {
+            String lower = d.name.toLowerCase(Locale.US);
+            if (d.isDir()) {
+                if (lower.equals("art") || lower.equals("audio") || lower.equals("scripts")) {
+                    collectRecursive(treeUri, d.id, new File(gameDir, d.name), out);
+                }
+            } else if (lower.equals("prototypeenginef.dll") || lower.endsWith(".rcf") || lower.endsWith(".p3d")) {
+                out.add(new CopyItem(DocumentsContract.buildDocumentUriUsingTree(treeUri, d.id),
+                        new File(gameDir, d.name), d.size));
+            }
+        }
+    }
+
+    private void collectRecursive(Uri treeUri, String docId, File destDir, List<CopyItem> out) {
+        for (ChildDoc d : listChildren(treeUri, docId)) {
+            if (importCancelled) return;
+            if (d.isDir()) {
+                collectRecursive(treeUri, d.id, new File(destDir, d.name), out);
+            } else {
+                out.add(new CopyItem(DocumentsContract.buildDocumentUriUsingTree(treeUri, d.id),
+                        new File(destDir, d.name), d.size));
+            }
+        }
+    }
+
+    private void startImport(final Uri treeUri) {
+        if (importRunning) return;
+        importRunning = true;
+        importCancelled = false;
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        importButton.setEnabled(false);
+        play.setEnabled(false);
+        importProgress.setVisibility(View.VISIBLE);
+        importProgress.setIndeterminate(true);
+        importStatus.setVisibility(View.VISIBLE);
+        importStatus.setText("Scanning the picked folder...");
+        io.execute(new Runnable() {
+            @Override
+            public void run() {
+                runImport(treeUri);
+            }
+        });
+    }
+
+    private void runImport(Uri treeUri) {
+        String message;
+        try {
+            message = doImport(treeUri);
+        } catch (RuntimeException e) {
+            message = "Import failed: " + e.getMessage();
+        }
+        final String result = message;
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                importRunning = false;
+                getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                importButton.setEnabled(true);
+                importProgress.setVisibility(View.GONE);
+                importStatus.setText(result);
+                Toast.makeText(SetupActivity.this, result, Toast.LENGTH_LONG).show();
+                refresh();
+            }
+        });
+    }
+
+    private String doImport(Uri treeUri) {
+        String rootId = findGameRoot(treeUri, DocumentsContract.getTreeDocumentId(treeUri));
+        if (rootId == null) {
+            return "No prototypeenginef.dll in the picked folder or its subfolders - "
+                    + "pick the game's installation folder.";
+        }
+        List<CopyItem> items = new ArrayList<>();
+        collectCopyItems(treeUri, rootId, items);
+        if (items.isEmpty()) return "Nothing to import was found there.";
+
+        long totalBytes = 0;
+        for (CopyItem item : items) {
+            if (!isUpToDate(item) && item.size > 0) totalBytes += item.size;
+        }
+        long free = new StatFs(baseDir.getPath()).getAvailableBytes();
+        if (totalBytes > free) {
+            return String.format(Locale.US, "Not enough free space: the import needs %.1f GB, %.1f GB free.",
+                    totalBytes / 1073741824f, free / 1073741824f);
+        }
+
+        updateImportProgress(0, totalBytes, 0, items.size(), true);
+        long doneBytes = 0;
+        int copied = 0, skipped = 0, errors = 0;
+        String firstError = null;
+        for (CopyItem item : items) {
+            if (importCancelled) {
+                return "Import cancelled (" + copied + " files copied). "
+                        + "Run it again to continue - finished files are skipped.";
+            }
+            if (isUpToDate(item)) {
+                skipped++;
+            } else {
+                try {
+                    doneBytes += copyOne(item, doneBytes, totalBytes);
+                    copied++;
+                } catch (IOException e) {
+                    errors++;
+                    if (firstError == null) firstError = item.dest.getName() + ": " + e.getMessage();
+                }
+            }
+            updateImportProgress(doneBytes, totalBytes, copied + skipped, items.size(), false);
+        }
+        String summary = String.format(Locale.US, "Imported %d files (%.1f GB), %d already up to date.",
+                copied, doneBytes / 1073741824f, skipped);
+        if (errors > 0) {
+            summary += " " + errors + " failed (first: " + firstError + "). Run the import again to retry them.";
+        }
+        return summary;
+    }
+
+    /** A file from an earlier (possibly interrupted) import: same size means it is already copied. */
+    private static boolean isUpToDate(CopyItem item) {
+        return item.size > 0 && item.dest.isFile() && item.dest.length() == item.size;
+    }
+
+    /** Copies one file through a .part sibling so a half-written file never looks complete. */
+    private long copyOne(CopyItem item, long doneBefore, long totalBytes) throws IOException {
+        File parent = item.dest.getParentFile();
+        if (parent != null && !parent.mkdirs() && !parent.isDirectory()) {
+            throw new IOException("cannot create " + parent);
+        }
+        File part = new File(parent, item.dest.getName() + ".part");
+        long done = 0;
+        long lastUi = 0;
+        try (InputStream in = getContentResolver().openInputStream(item.uri);
+             FileOutputStream out = new FileOutputStream(part)) {
+            if (in == null) throw new IOException("cannot open the source file");
+            byte[] buf = new byte[262144];
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                if (importCancelled) throw new IOException("cancelled");
+                out.write(buf, 0, n);
+                done += n;
+                long now = System.currentTimeMillis();
+                if (now - lastUi >= 250) {
+                    lastUi = now;
+                    updateImportProgress(doneBefore + done, totalBytes, -1, -1, false);
+                }
+            }
+        } catch (IOException e) {
+            part.delete();
+            throw e;
+        } catch (RuntimeException e) {
+            part.delete();
+            throw new IOException(String.valueOf(e.getMessage()));
+        }
+        if (!part.renameTo(item.dest)) {
+            part.delete();
+            throw new IOException("cannot move into place: " + item.dest.getName());
+        }
+        return done;
+    }
+
+    private void updateImportProgress(final long doneBytes, final long totalBytes,
+                                      final int filesDone, final int filesTotal, final boolean scanning) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                importProgress.setIndeterminate(false);
+                importProgress.setProgress((int) Math.min(1000, doneBytes * 1000 / Math.max(totalBytes, 1)));
+                if (filesDone >= 0) {
+                    importStatus.setText(String.format(Locale.US, "%s %.1f / %.1f GB (%d/%d files)",
+                            scanning ? "Importing:" : "Importing...",
+                            doneBytes / 1073741824f, totalBytes / 1073741824f, filesDone, filesTotal));
+                }
+            }
+        });
     }
 
     private static void deleteRecursive(File f) {
