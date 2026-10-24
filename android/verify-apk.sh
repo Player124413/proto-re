@@ -118,6 +118,7 @@ fi
 
 grep -a -q 'com/protore/game/SetupActivity' "$TMP/classes.dex" || fail "SetupActivity missing from classes.dex"
 grep -a -q 'com/protore/game/ProtoActivity' "$TMP/classes.dex" || fail "ProtoActivity missing from classes.dex"
+grep -a -q 'com/protore/game/TurnipDriverPackage' "$TMP/classes.dex" || fail "TurnipDriverPackage (ZIP driver import) missing from classes.dex"
 grep -a -q 'org/libsdl/app/SDLActivity' "$TMP/classes.dex" || fail "SDLActivity missing from classes.dex"
 ok "dex classes"
 

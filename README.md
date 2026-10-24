@@ -55,6 +55,13 @@ an increasing version code, so a newer APK installs over the old one like a norm
 game files and saves. Only when coming from an older CI build (signed with a throwaway per-run key) do
 you have to uninstall once.
 
+On Adreno, the setup screen's "Turnip driver" section can import a standard AdrenoTools Mesa Turnip
+driver ZIP (`.zip`/`.adpkg.zip`: `meta.json` plus the driver `.so` it names; do not unzip it). The
+driver is stored in the app's internal storage and replaces the Turnip bundled in the APK from the next
+start; "Use bundled Turnip" removes it again. If an imported driver cannot load, the game logs why and
+falls back to the bundled/system driver. Only import drivers from a source you trust - a driver ZIP is
+native code.
+
 Logs go to the same folder (`proto-native.log`, `app_process64_d3d9.log`) and to `adb logcat -s protore`.
 
 `protore.ini` keys:
@@ -66,7 +73,7 @@ Logs go to the same folder (`proto-native.log`, `app_process64_d3d9.log`) and to
 | `fps_limit` | 30 / 45 / 60 |
 | `battery_saver` | 30 fps, no big core pinning |
 | `perf_hint` | ADPF on/off |
-| `vulkan_driver` | `auto` / `system` / `turnip` |
+| `vulkan_driver` | `auto` (imported/bundled Turnip on Adreno) / `system` / `turnip` (force retry) |
 | `present_stats` | DXVK stats in the log |
 | `import_profile`, `watchdog` | profiling, hang diagnostics |
 

@@ -11,6 +11,7 @@ import android.content.SharedPreferences;
 import android.database.Cursor;
 import android.graphics.Typeface;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.StatFs;
 import android.provider.DocumentsContract;
@@ -45,8 +46,9 @@ import java.util.concurrent.Executors;
 /**
  * First-launch screen: creates the game folder, checks that the files copied from the PC version are really
  * there (and can copy them itself from a folder the player picks, through the system file picker), picks a
- * conservative quality preset for the device and backs up the saves (the emulated C: drive in native_c/)
- * before the game starts. The game itself still runs in ProtoActivity, unchanged.
+ * conservative quality preset for the device, optionally imports a Mesa Turnip driver ZIP for Adreno,
+ * and backs up the saves (the emulated C: drive in native_c/) before the game starts. The game itself
+ * still runs in ProtoActivity, unchanged.
  *
  * Quality presets share their storage with the in-game settings panel (TouchControls): engine values go to
  * protore.ini, the matching setting indices go to the "controls" preferences, so the two never fight.
@@ -76,14 +78,15 @@ public class SetupActivity extends Activity {
     private static final String OK = "\u2713 ", NO = "\u2717 ", WARN = "! ";
 
     private static final int REQ_PICK_GAME_FOLDER = 4101;
+    private static final int REQ_PICK_TURNIP_ZIP = 4102;
 
     private final ExecutorService io = Executors.newSingleThreadExecutor();
-    private File baseDir, gameDir, iniFile;
-    private TextView status, presetInfo, backupInfo, importStatus;
-    private Button play, importButton;
+    private File baseDir, gameDir, iniFile, turnipDir;
+    private TextView status, presetInfo, turnipInfo, backupInfo, importStatus;
+    private Button play, importButton, turnipImportButton, turnipRemoveButton;
     private ProgressBar importProgress;
     private final Button[] presetButtons = new Button[PRESET_NAMES.length];
-    private volatile boolean backupRunning, importRunning, importCancelled;
+    private volatile boolean backupRunning, importRunning, importCancelled, driverImportRunning;
     private boolean dllOk;
     private int autoPreset = 1;
     private long totalRamBytes;
@@ -92,6 +95,7 @@ public class SetupActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         baseDir = getExternalFilesDir(null);
+        turnipDir = TurnipDriverPackage.dir(this);  // internal storage: drivers cannot dlopen from /sdcard
         buildUi();
         if (baseDir == null) {
             status.setText(NO + "External storage is unavailable, the game folder cannot be created.");
@@ -160,7 +164,8 @@ public class SetupActivity extends Activity {
                 + "folder (the needed files are copied here automatically), or copy manually into the folder "
                 + "shown below: prototypeenginef.dll, all .rcf and .p3d files, and the art, audio, scripts folders.\n"
                 + "2. Pick a quality preset (it can also be changed in game).\n"
-                + "3. Press Play.", 15, TEXT, false), 14);
+                + "3. On Adreno, optionally import a Turnip driver ZIP.\n"
+                + "4. Press Play.", 15, TEXT, false), 14);
 
         status = text("", 15, TEXT, false);
         status.setTypeface(Typeface.MONOSPACE);
@@ -186,6 +191,10 @@ public class SetupActivity extends Activity {
             public void onClick(View v) {
                 if (importRunning) {
                     Toast.makeText(SetupActivity.this, "Importing game files...", Toast.LENGTH_SHORT).show();
+                    return;
+                }
+                if (driverImportRunning) {
+                    Toast.makeText(SetupActivity.this, "Importing Turnip driver...", Toast.LENGTH_SHORT).show();
                     return;
                 }
                 if (backupRunning) {
@@ -245,6 +254,29 @@ public class SetupActivity extends Activity {
         presetInfo = text("", 14, DIM, false);
         add(root, presetInfo, 6);
 
+        add(root, text("Turnip driver (Adreno)", 20, RED, true), 20);
+        turnipInfo = text("", 14, DIM, false);
+        add(root, turnipInfo, 6);
+        LinearLayout driverRow = new LinearLayout(this);
+        driverRow.setOrientation(LinearLayout.HORIZONTAL);
+        turnipImportButton = button("Import Turnip ZIP...", new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                pickTurnipZip();
+            }
+        });
+        turnipRemoveButton = button("Use bundled Turnip", new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                removeImportedTurnip();
+            }
+        });
+        LinearLayout.LayoutParams driverHalf = new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        driverRow.addView(turnipImportButton, driverHalf);
+        driverRow.addView(turnipRemoveButton, driverHalf);
+        add(root, driverRow, 6);
+
         add(root, text("Saves", 20, RED, true), 20);
         backupInfo = text("", 14, DIM, false);
         add(root, backupInfo, 6);
@@ -287,9 +319,10 @@ public class SetupActivity extends Activity {
         s.append(String.format(Locale.US, "\nFree space: %.1f GB", fs.getAvailableBytes() / 1073741824f));
         status.setText(s.toString());
 
-        play.setEnabled(dllOk && !importRunning);
+        play.setEnabled(dllOk && !importRunning && !driverImportRunning);
         play.setText(dllOk ? "Play" : "Copy the game files first");
         updatePresetUi();
+        updateTurnipUi();
         updateBackupInfo();
     }
 
@@ -439,6 +472,183 @@ public class SetupActivity extends Activity {
                 + "the same values can be tuned in the in-game settings panel.");
     }
 
+    // ---- imported Turnip driver (Adreno): an AdrenoTools ZIP in internal storage ----
+
+    private void updateTurnipUi() {
+        if (turnipInfo == null || turnipImportButton == null || turnipRemoveButton == null) return;
+        boolean installedDir = turnipDir != null && turnipDir.isDirectory();
+        boolean adreno = new File("/dev/kgsl-3d0").exists();
+        TurnipDriverPackage.Meta meta = null;
+        String error = null;
+        if (installedDir) {
+            try {
+                meta = TurnipDriverPackage.readInstalled(turnipDir);
+            } catch (Exception e) {
+                error = e.getMessage();
+            }
+        }
+
+        String text;
+        if (driverImportRunning) {
+            text = "Working on the Turnip driver...";
+        } else if (meta != null) {
+            File main = TurnipDriverPackage.mainLibrary(turnipDir, meta);
+            String size = main == null ? ""
+                    : String.format(Locale.US, " (%.1f MB)", main.length() / 1048576f);
+            text = OK + "Imported driver: " + meta.label()
+                    + "\nLibrary: " + meta.libraryName + size
+                    + (meta.minApi > 0 ? ", min API " + meta.minApi : "")
+                    + "\n" + (adreno
+                    ? "It replaces the APK's bundled Turnip on the next game start. If it does not load, "
+                    + "the game falls back to the bundled/system driver (see proto-native.log)."
+                    : "No Adreno/KGSL device was detected, so this driver will not be used here.");
+        } else if (installedDir) {
+            text = WARN + "The imported driver folder is incomplete or invalid"
+                    + (error == null || error.isEmpty() ? "" : ": " + error)
+                    + ". The bundled/system driver will be used; import another ZIP or tap "
+                    + "\"Use bundled Turnip\".";
+        } else {
+            text = "Using the Turnip driver bundled in this APK on Adreno (the system driver elsewhere)."
+                    + "\nImport accepts a standard AdrenoTools Mesa Turnip ZIP (.zip/.adpkg.zip: "
+                    + "meta.json + libvulkan_freedreno.so). Do not unzip it first. Only import native "
+                    + "code from a source you trust."
+                    + (adreno ? "" : "\nNo Adreno/KGSL device was detected on this phone.");
+        }
+        turnipInfo.setText(text);
+        turnipImportButton.setEnabled(!driverImportRunning && !importRunning);
+        turnipRemoveButton.setEnabled(installedDir && !driverImportRunning && !importRunning);
+        turnipRemoveButton.setText(installedDir ? "Use bundled Turnip" : "Bundled Turnip in use");
+    }
+
+    private void pickTurnipZip() {
+        if (driverImportRunning || importRunning) return;
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("*/*");
+        intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[] {
+                "application/zip", "application/x-zip-compressed", "application/octet-stream"});
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+        try {
+            startActivityForResult(intent, REQ_PICK_TURNIP_ZIP);
+        } catch (ActivityNotFoundException e) {
+            Toast.makeText(this, "No file picker on this device", Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private void startTurnipImport(final Uri zipUri) {
+        if (driverImportRunning || importRunning || turnipDir == null) return;
+        driverImportRunning = true;
+        play.setEnabled(false);
+        updateTurnipUi();
+        io.execute(new Runnable() {
+            @Override
+            public void run() {
+                String message;
+                try (InputStream in = getContentResolver().openInputStream(zipUri)) {
+                    TurnipDriverPackage.Meta meta = TurnipDriverPackage.install(
+                            in, turnipDir, Build.VERSION.SDK_INT);
+                    clearTurnipFailureMarkers();
+                    boolean changedMode = ensureImportedDriverWillBeTried();
+                    message = "Turnip driver imported: " + meta.label()
+                            + ". It will be tried on the next game start."
+                            + (changedMode
+                            ? " protore.ini had vulkan_driver = system, so it was changed to auto." : "");
+                } catch (Exception e) {
+                    message = "Turnip import failed: " + String.valueOf(e.getMessage());
+                }
+                final String result = message;
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        driverImportRunning = false;
+                        Toast.makeText(SetupActivity.this, result, Toast.LENGTH_LONG).show();
+                        refresh();
+                    }
+                });
+            }
+        });
+    }
+
+    private void removeImportedTurnip() {
+        if (driverImportRunning || importRunning || turnipDir == null || !turnipDir.exists()) return;
+        driverImportRunning = true;
+        play.setEnabled(false);
+        updateTurnipUi();
+        io.execute(new Runnable() {
+            @Override
+            public void run() {
+                TurnipDriverPackage.deleteRecursive(turnipDir);
+                clearTurnipFailureMarkers();
+                final String result = turnipDir.exists()
+                        ? "Could not remove the imported Turnip driver"
+                        : "Imported Turnip driver removed; the bundled Turnip will be used";
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        driverImportRunning = false;
+                        Toast.makeText(SetupActivity.this, result, Toast.LENGTH_LONG).show();
+                        refresh();
+                    }
+                });
+            }
+        });
+    }
+
+    /** A different imported driver deserves a fresh try even if another one crashed during startup. */
+    private void clearTurnipFailureMarkers() {
+        if (baseDir == null) return;
+        deleteRecursive(new File(baseDir, "turnip_failed"));
+        deleteRecursive(new File(baseDir, "turnip_pending"));
+    }
+
+    /** Importing a driver while protore.ini pins the system driver would silently do nothing. */
+    private boolean ensureImportedDriverWillBeTried() {
+        return "system".equalsIgnoreCase(readIniString("vulkan_driver"))
+                && writeIniString("vulkan_driver", "auto");
+    }
+
+    private String readIniString(String key) {
+        try {
+            if (iniFile == null || !iniFile.exists()) return "";
+            for (String rawLine : new String(Files.readAllBytes(iniFile.toPath()), StandardCharsets.UTF_8)
+                    .split("\n")) {
+                String line = rawLine;
+                int hash = line.indexOf('#');
+                int semi = line.indexOf(';');
+                int cut = hash < 0 ? semi : (semi < 0 ? hash : Math.min(hash, semi));
+                if (cut >= 0) line = line.substring(0, cut);
+                String[] kv = line.split("=", 2);
+                if (kv.length == 2 && key.equalsIgnoreCase(kv[0].trim())) return kv[1].trim();
+            }
+        } catch (Exception ignored) {
+            // the native side falls back to auto when the ini cannot be read
+        }
+        return "";
+    }
+
+    private boolean writeIniString(String key, String value) {
+        if (iniFile == null) return false;
+        StringBuilder out = new StringBuilder();
+        try {
+            if (iniFile.exists()) {
+                for (String line : new String(Files.readAllBytes(iniFile.toPath()), StandardCharsets.UTF_8)
+                        .split("\n")) {
+                    String[] kv = line.split("=", 2);
+                    if (kv.length != 2 || !key.equalsIgnoreCase(kv[0].trim())) {
+                        out.append(line).append('\n');
+                    }
+                }
+            }
+            out.append(key).append(" = ").append(value).append('\n');
+            try (FileWriter w = new FileWriter(iniFile)) {
+                w.write(out.toString());
+            }
+            return true;
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
     // ---- save backups (native_c/: the emulated C: drive with the engine's saves and settings) ----
 
     private void updateBackupInfo() {
@@ -542,7 +752,7 @@ public class SetupActivity extends Activity {
     // ---- import: pick the PC installation folder, copy what the port needs into game/ ----
 
     private void pickGameFolder() {
-        if (importRunning || gameDir == null) return;
+        if (importRunning || driverImportRunning || gameDir == null) return;
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
         intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
         try {
@@ -556,17 +766,18 @@ public class SetupActivity extends Activity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode != REQ_PICK_GAME_FOLDER || resultCode != RESULT_OK || data == null
-                || data.getData() == null) {
-            return;
-        }
-        Uri treeUri = data.getData();
+        if (resultCode != RESULT_OK || data == null || data.getData() == null) return;
+        Uri uri = data.getData();
         try {
-            getContentResolver().takePersistableUriPermission(treeUri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            getContentResolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
         } catch (RuntimeException ignored) {
             // the temporary grant from the picker is enough for this import
         }
-        startImport(treeUri);
+        if (requestCode == REQ_PICK_GAME_FOLDER) {
+            startImport(uri);
+        } else if (requestCode == REQ_PICK_TURNIP_ZIP) {
+            startTurnipImport(uri);
+        }
     }
 
     private static final class ChildDoc {
@@ -663,7 +874,7 @@ public class SetupActivity extends Activity {
     }
 
     private void startImport(final Uri treeUri) {
-        if (importRunning) return;
+        if (importRunning || driverImportRunning) return;
         importRunning = true;
         importCancelled = false;
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
