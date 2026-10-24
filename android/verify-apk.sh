@@ -12,7 +12,13 @@ APK=${1:?usage: android/verify-apk.sh <apk> [abi]}
 ABI=${2:-arm64-v8a}
 EXPECT_TURNIP=${EXPECT_TURNIP:-1}
 
-fail() { echo "verify-apk: FAIL: $*" >&2; exit 1; }
+fail() {
+    echo "verify-apk: FAIL: $*" >&2
+    # In GitHub Actions, surface the reason as an annotation too (visible in the run header/API, not
+    # only buried in the log).
+    [ "${GITHUB_ACTIONS:-}" = true ] && echo "::error title=verify-apk::FAIL: $*" >&2
+    exit 1
+}
 ok() { echo "verify-apk: ok: $*"; }
 
 [ -f "$APK" ] || fail "no such file: $APK"
