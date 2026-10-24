@@ -117,10 +117,15 @@ The deps (SDL2, FAudio, DXVK, Turnip) are also built by GitHub Actions. `cool_ma
 GitHub Actions can also package the whole APK (`.github/workflows/android-apk.yml`). On every push it
 builds a CI APK against a stub engine table (`tools/recomp/make_stub.py`): deps, Turnip, the runtime,
 Java, packaging, signing and `android/verify-apk.sh` all run end to end, but the APK has no game code in
-it and is not playable. A real APK is a manual run of the same workflow with `engine=full`; it needs your
-own `prototypeenginef.dll` behind the `PROTORE_ENGINE_URL` repository secret (a direct HTTPS link, plus
-optional `PROTORE_ENGINE_SHA256`). The DLL and the generated C stay on the runner and are deleted before
-the artifact upload — only the APK is kept.
+it and is not playable. A real APK is a manual run of the same workflow with `engine=full`, and the run form
+asks for a link to your own `prototypeenginef.dll`: upload it to Hugging Face (a repo of yours; the file
+page `.../blob/main/...` link works, `android/download-engine.py` rewrites it to the download route) or to
+Google Drive (Share → "Anyone with the link"), then paste that link into the `engine_url` field when
+starting the run; the optional `engine_sha256` field verifies the download. Careful: run inputs are visible
+in the public run history, so anyone could reuse such a link — for a private link leave the field empty and
+use the `PROTORE_ENGINE_URL` repository secret instead (plus optional `PROTORE_ENGINE_SHA256`, and an
+`HF_TOKEN` read-token secret for a private Hugging Face repo). Either way the DLL and the generated C stay
+on the runner and are deleted before the artifact upload — only the APK is kept.
 
 Desktop build (DXVK 2.5.3 with `-Denable_d3d9=true -Ddxvk_native_wsi=sdl2` and FAudio in `~/proto-re-data/deps`):
 

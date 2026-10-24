@@ -6,10 +6,14 @@
 #    packaging, signing, android/verify-apk.sh), but contains NO game code and is NOT playable; the file and
 #    artifact names say so.
 #  * full (manual run with engine=full): recompiles your own prototypeenginef.dll and packages the real APK
-#    exactly like the local build in README.md. Provide the DLL through the PROTORE_ENGINE_URL repository
-#    secret (a direct HTTPS link to your own backup of the file, e.g. a presigned/private URL) and,
-#    optionally, PROTORE_ENGINE_SHA256 to verify the download. The DLL and the generated C never leave the
-#    runner and are deleted before the upload: the only artifact is the APK.
+#    exactly like the local build in README.md. Where the DLL comes from, in order of preference:
+#      1. the engine_url run input - paste a link to the file on Hugging Face or Google Drive (or any
+#         direct HTTPS link) right in the "Run workflow" form; browser-copied links work, see
+#         android/download-engine.py. Links in run inputs are VISIBLE in the run history, so...
+#      2. the PROTORE_ENGINE_URL repository secret - same link, but invisible. Prefer this for private links.
+#    For a private Hugging Face repo, add a read token as the HF_TOKEN secret. Optionally give the file's
+#    SHA-256 (engine_sha256 input or PROTORE_ENGINE_SHA256 secret) to verify the download. The DLL and the
+#    generated C never leave the runner and are deleted before the upload: the only artifact is the APK.
 #
 # Game data (RCF/P3D/...) is never part of the APK. Signing uses a debug key generated on the runner,
 # same as a local android/build-apk.sh run.
@@ -26,11 +30,21 @@ on:
   workflow_dispatch:
     inputs:
       engine:
-        description: "stub: CI build without game code. full: real APK, needs the PROTORE_ENGINE_URL secret"
+        description: "stub: CI build without game code. full: real APK - paste the DLL link into engine_url below"
         type: choice
         options: [stub, full]
         default: stub
         required: true
+      engine_url:
+        description: "full only: link to YOUR prototypeenginef.dll on Hugging Face or Google Drive (anyone-with-the-link). WARNING: this link is visible in the public run history - for a private link leave it empty and use the PROTORE_ENGINE_URL secret"
+        type: string
+        default: ""
+        required: false
+      engine_sha256:
+        description: "Optional: SHA-256 of prototypeenginef.dll (sha256sum output); the download must match it"
+        type: string
+        default: ""
+        required: false
       turnip:
         description: "Build Turnip (Mesa) for Adreno; slow on a cold cache"
         type: boolean
@@ -67,6 +81,7 @@ jobs:
           INPUT_ENGINE: ${{ inputs.engine }}
           INPUT_TURNIP: ${{ inputs.turnip }}
           ENGINE_URL: ${{ secrets.PROTORE_ENGINE_URL }}
+          INPUT_ENGINE_URL: ${{ inputs.engine_url }}
         run: |
           set -euo pipefail
           mode=stub
@@ -83,22 +98,22 @@ jobs:
               stub|full) ;;
               *) echo "::error::input engine must be stub or full, got '$mode'"; exit 1 ;;
           esac
-          if [ "$mode" = full ] && [ -z "${ENGINE_URL}" ]; then
+          if [ "$mode" = full ] && [ -z "${ENGINE_URL}" ] && [ -z "${INPUT_ENGINE_URL}" ]; then
               {
                   echo "### android-apk: cannot build the full APK"
                   echo ""
-                  echo "This run asked for \`engine=full\`, but the \`PROTORE_ENGINE_URL\` repository secret is not set."
+                  echo "This run asked for \`engine=full\`, but no link to \`prototypeenginef.dll\` was given."
                   echo ""
-                  echo "1. Take \`prototypeenginef.dll\` from your own copy of the game."
-                  echo "2. Upload it somewhere only you can reach and copy a direct HTTPS download link."
-                  echo "3. Repository Settings -> Secrets and variables -> Actions -> New repository secret:"
-                  echo "   - \`PROTORE_ENGINE_URL\` = that link"
-                  echo "   - \`PROTORE_ENGINE_SHA256\` = output of \`sha256sum prototypeenginef.dll\` (optional, recommended)"
-                  echo "4. Re-run this workflow with \`engine=full\`."
+                  echo "Easiest - paste a link into the \`engine_url\` field when starting the run:"
+                  echo "1. Take \`prototypeenginef.dll\` from your own copy of the game (Steam app 10150, build 19788432)."
+                  echo "2. Upload it to Hugging Face (a repo of yours; the file page link \`.../blob/main/...\` works, it is rewritten to \`/resolve/\`) or to Google Drive (Share -> \`Anyone with the link\` -> Copy link)."
+                  echo "3. Actions -> android-apk -> Run workflow: \`engine=full\`, paste the link into \`engine_url\`, optionally the SHA-256 into \`engine_sha256\`."
                   echo ""
-                  echo "The DLL is downloaded only onto the ephemeral runner, is never committed or uploaded, and is deleted before the APK artifact is published."
+                  echo "Note: a link pasted into a run input is **visible in the public run history**. For a private link leave \`engine_url\` empty and instead set repository secrets (Settings -> Secrets and variables -> Actions): \`PROTORE_ENGINE_URL\` with the same link, optional \`PROTORE_ENGINE_SHA256\`, and for a private Hugging Face repo a read token in \`HF_TOKEN\`."
+                  echo ""
+                  echo "Either way the DLL is downloaded only onto the ephemeral runner, is never committed or uploaded, and is deleted before the APK artifact is published."
               } >> "$GITHUB_STEP_SUMMARY"
-              echo "::error::engine=full needs the PROTORE_ENGINE_URL secret (see the run summary for setup steps)"
+              echo "::error::engine=full needs an engine_url link (Hugging Face / Google Drive) or the PROTORE_ENGINE_URL secret (see the run summary)"
               exit 1
           fi
           {
@@ -106,6 +121,13 @@ jobs:
               echo ""
               echo "- engine: **$mode**"
               echo "- turnip: **$turnip**"
+              if [ "$mode" = full ]; then
+                  if [ -n "${INPUT_ENGINE_URL}" ]; then
+                      echo "- engine source: **engine_url run input** (the link is part of this run's public inputs)"
+                  else
+                      echo "- engine source: **PROTORE_ENGINE_URL secret**"
+                  fi
+              fi
               if [ "$mode" = stub ]; then
                   echo ""
                   echo "> Stub mode: the artifact validates the build pipeline only. It contains **no game code** and is **not playable**."
@@ -336,24 +358,32 @@ jobs:
 
       - name: Recompiler dependencies
         if: needs.preflight.outputs.mode == 'full'
-        run: pip install "capstone>=5,<6" "pefile>=2023.2.7"
+        run: pip install "capstone>=5,<6" "pefile>=2023.2.7" "gdown>=5.2"
 
-      - name: Download the engine DLL (your own copy, via secret)
+      - name: Download the engine DLL (Hugging Face / Google Drive / secret link)
         if: needs.preflight.outputs.mode == 'full'
         env:
-          ENGINE_URL: ${{ secrets.PROTORE_ENGINE_URL }}
-          ENGINE_SHA256: ${{ secrets.PROTORE_ENGINE_SHA256 }}
+          ENGINE_URL_SECRET: ${{ secrets.PROTORE_ENGINE_URL }}
+          ENGINE_URL_INPUT: ${{ inputs.engine_url }}
+          ENGINE_SHA256_SECRET: ${{ secrets.PROTORE_ENGINE_SHA256 }}
+          ENGINE_SHA256_INPUT: ${{ inputs.engine_sha256 }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           set -euo pipefail
-          # Never echo ENGINE_URL: it can carry credentials. GitHub masks the secret value in logs.
+          URL="${ENGINE_URL_INPUT:-}"
+          [ -n "$URL" ] || URL="${ENGINE_URL_SECRET:-}"
+          [ -n "$URL" ] || { echo "::error::no engine link: fill the engine_url run input or set the PROTORE_ENGINE_URL secret"; exit 1; }
           mkdir -p "$RUNNER_TEMP/engine"
           DLL="$RUNNER_TEMP/engine/prototypeenginef.dll"
-          curl -fL --retry 3 --retry-delay 5 -o "$DLL" "$ENGINE_URL"
+          # Hugging Face (/blob/ pages too), Google Drive share links and direct links; never prints the URL.
+          python3 android/download-engine.py "$URL" "$DLL"
           ls -lh "$DLL"
+          ENGINE_SHA256="${ENGINE_SHA256_INPUT:-}"
+          [ -n "$ENGINE_SHA256" ] || ENGINE_SHA256="${ENGINE_SHA256_SECRET:-}"
           if [ -n "${ENGINE_SHA256}" ]; then
               echo "$(tr '[:upper:]' '[:lower:]' <<<"$ENGINE_SHA256")  $DLL" | sha256sum -c -
           else
-              echo "::warning::PROTORE_ENGINE_SHA256 is not set; the DLL is only sanity-checked as a 32-bit PE"
+              echo "::warning::no SHA-256 given (engine_sha256 input / PROTORE_ENGINE_SHA256 secret); the DLL is only sanity-checked as a 32-bit PE"
               sha256sum "$DLL"
           fi
           ENGINE_DLL="$DLL" python3 - <<'PY'
