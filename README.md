@@ -70,7 +70,9 @@ Every key also works as an env var `PROTORE_<KEY>`.
 
 `tools/recomp/recomp.py` (capstone) turns each engine function into `void f_<va>(Ctx*)` with explicit CPU
 state: flags with liveness analysis, x87 and SSE, jump tables, setjmp/longjmp, atomics. All 73,595
-functions go through, no unsupported instructions.
+real (non-thunk) functions go through with no unsupported instructions; thunks and the heuristic
+extra entries from `data_entries.py` are generated too and counted separately in the summary (false
+positives among them are dead code).
 
 `src/native` is the runtime: PE loader, the Windows imports the engine uses, D3D9 forwarded to DXVK,
 XAudio2 to FAudio, input through SDL2. A few hot paths (skinning, audio) are written by hand.
