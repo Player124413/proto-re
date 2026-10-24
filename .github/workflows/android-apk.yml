@@ -123,11 +123,11 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Cache deps
         id: cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: deps/${{ env.ABI }}
           key: android-apk-deps-${{ env.ABI }}-ndk${{ env.NDK_VERSION }}-meson${{ env.MESON_VERSION }}-${{ hashFiles('android/build-deps.sh', 'android/patches/**') }}
@@ -173,7 +173,7 @@ jobs:
           done
           find "deps/$ABI" -name '*.so' -exec ls -lh {} +
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: android-deps-${{ env.ABI }}
           path: deps/${{ env.ABI }}
@@ -187,11 +187,11 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Cache Turnip
         id: cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: turnip
           key: android-apk-turnip-ndk${{ env.NDK_VERSION }}-meson${{ env.MESON_VERSION }}-${{ hashFiles('android/build-turnip.sh') }}
@@ -237,7 +237,7 @@ jobs:
           done
           find turnip \( -name '*.so' -o -name '*.a' \) -exec ls -lh {} +
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: android-turnip-${{ env.ABI }}
           path: turnip
@@ -251,9 +251,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "17"
@@ -283,14 +283,14 @@ jobs:
           sudo apt-get install -y --no-install-recommends make zip unzip file binutils
 
       - name: Download deps
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: android-deps-${{ env.ABI }}
           path: deps/${{ env.ABI }}
 
       - name: Download Turnip
         if: needs.preflight.outputs.turnip == 'true'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: android-turnip-${{ env.ABI }}
           path: turnip
@@ -330,7 +330,7 @@ jobs:
 
       - name: Python for the recompiler
         if: needs.preflight.outputs.mode == 'full'
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -452,7 +452,7 @@ jobs:
         run: rm -rf "$RUNNER_TEMP/engine" "$RUNNER_TEMP/recomp.log" build/recomp
 
       - name: Upload the APK
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: prototype-apk-${{ needs.preflight.outputs.mode }}-${{ env.ABI }}
           path: dist/
