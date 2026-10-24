@@ -101,14 +101,23 @@ APK:
 android/build-deps.sh arm64-v8a ~/proto-re-data/android-deps-src ~/proto-re-data/android-deps/arm64-v8a
 android/build-turnip.sh ~/proto-re-data/android-deps-src ~/proto-re-data/android-turnip
 python3 -I tools/recomp/data_entries.py
-python3 -I tools/recomp/recomp.py --functions all --out build/recomp/all --split 400
+python3 -I tools/recomp/recomp.py --functions all --base 0x58000000 --out build/recomp/native --split 400
 tools/cool_make.sh -C src/native PLATFORM=android ABI=arm64-v8a
 android/build-apk.sh arm64-v8a
+android/verify-apk.sh build/apk/prototype.apk arm64-v8a
 adb install -r build/apk/prototype.apk
 ```
 
 Зависимости (SDL2, FAudio, DXVK, Turnip) ещё собирает GitHub Actions. `cool_make.sh` это make в 2 потока,
 который ставит сборку на паузу, когда процессор перегревается: без него ноут один раз выключился.
+
+GitHub Actions умеет собирать и весь APK (`.github/workflows/android-apk.yml`). На каждый push собирается
+CI-APK со стаб-таблицей движка (`tools/recomp/make_stub.py`): зависимости, Turnip, рантайм, Java, упаковка,
+подпись и `android/verify-apk.sh` проходят целиком, но кода игры в таком APK нет и играть в него нельзя.
+Настоящий APK собирается ручным запуском того же workflow с `engine=full`; для него нужен ваш собственный
+`prototypeenginef.dll` за секретом `PROTORE_ENGINE_URL` (прямая HTTPS-ссылка, плюс необязательный
+`PROTORE_ENGINE_SHA256`). DLL и сгенерированный C остаются на раннере и удаляются перед загрузкой
+артефакта — сохраняется только APK.
 
 Сборка для ПК (DXVK 2.5.3 с `-Denable_d3d9=true -Ddxvk_native_wsi=sdl2` и FAudio в `~/proto-re-data/deps`):
 

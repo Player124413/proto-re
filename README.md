@@ -100,14 +100,23 @@ APK:
 android/build-deps.sh arm64-v8a ~/proto-re-data/android-deps-src ~/proto-re-data/android-deps/arm64-v8a
 android/build-turnip.sh ~/proto-re-data/android-deps-src ~/proto-re-data/android-turnip
 python3 -I tools/recomp/data_entries.py
-python3 -I tools/recomp/recomp.py --functions all --out build/recomp/all --split 400
+python3 -I tools/recomp/recomp.py --functions all --base 0x58000000 --out build/recomp/native --split 400
 tools/cool_make.sh -C src/native PLATFORM=android ABI=arm64-v8a
 android/build-apk.sh arm64-v8a
+android/verify-apk.sh build/apk/prototype.apk arm64-v8a
 adb install -r build/apk/prototype.apk
 ```
 
 The deps (SDL2, FAudio, DXVK, Turnip) are also built by GitHub Actions. `cool_make.sh` is make with
 2 jobs that pauses when the CPU gets too hot, my laptop shut down once without it.
+
+GitHub Actions can also package the whole APK (`.github/workflows/android-apk.yml`). On every push it
+builds a CI APK against a stub engine table (`tools/recomp/make_stub.py`): deps, Turnip, the runtime,
+Java, packaging, signing and `android/verify-apk.sh` all run end to end, but the APK has no game code in
+it and is not playable. A real APK is a manual run of the same workflow with `engine=full`; it needs your
+own `prototypeenginef.dll` behind the `PROTORE_ENGINE_URL` repository secret (a direct HTTPS link, plus
+optional `PROTORE_ENGINE_SHA256`). The DLL and the generated C stay on the runner and are deleted before
+the artifact upload — only the APK is kept.
 
 Desktop build (DXVK 2.5.3 with `-Denable_d3d9=true -Ddxvk_native_wsi=sdl2` and FAudio in `~/proto-re-data/deps`):
 

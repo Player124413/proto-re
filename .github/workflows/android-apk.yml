@@ -1,0 +1,460 @@
+# End-to-end Android APK build on GitHub's runners.
+#
+# Two modes:
+#  * stub (every push, and the default for manual runs): links src/native against a stub recompiled-engine
+#    table (tools/recomp/make_stub.py). The APK proves the whole pipeline works (deps, Turnip, runtime, Java,
+#    packaging, signing, android/verify-apk.sh), but contains NO game code and is NOT playable; the file and
+#    artifact names say so.
+#  * full (manual run with engine=full): recompiles your own prototypeenginef.dll and packages the real APK
+#    exactly like the local build in README.md. Provide the DLL through the PROTORE_ENGINE_URL repository
+#    secret (a direct HTTPS link to your own backup of the file, e.g. a presigned/private URL) and,
+#    optionally, PROTORE_ENGINE_SHA256 to verify the download. The DLL and the generated C never leave the
+#    runner and are deleted before the upload: the only artifact is the APK.
+#
+# Game data (RCF/P3D/...) is never part of the APK. Signing uses a debug key generated on the runner,
+# same as a local android/build-apk.sh run.
+name: android-apk
+
+on:
+  push:
+    paths:
+      - .github/workflows/android-apk.yml
+      - android/**
+      - src/native/**
+      - src/recomp/**
+      - tools/recomp/**
+  workflow_dispatch:
+    inputs:
+      engine:
+        description: "stub: CI build without game code. full: real APK, needs the PROTORE_ENGINE_URL secret"
+        type: choice
+        options: [stub, full]
+        default: stub
+        required: true
+      turnip:
+        description: "Build Turnip (Mesa) for Adreno; slow on a cold cache"
+        type: boolean
+        default: true
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-apk-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ABI: arm64-v8a
+  NDK_VERSION: 28.2.13676358
+  ANDROID_PLATFORM: android-35
+  BUILD_TOOLS_VERSION: 36.0.0
+  MESON_VERSION: 1.5.2
+
+jobs:
+  preflight:
+    name: preflight
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      mode: ${{ steps.mode.outputs.mode }}
+      turnip: ${{ steps.mode.outputs.turnip }}
+    steps:
+      - name: Resolve build mode
+        id: mode
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_ENGINE: ${{ inputs.engine }}
+          INPUT_TURNIP: ${{ inputs.turnip }}
+          ENGINE_URL: ${{ secrets.PROTORE_ENGINE_URL }}
+        run: |
+          set -euo pipefail
+          mode=stub
+          turnip=true
+          if [ "$EVENT" = workflow_dispatch ]; then
+              mode=${INPUT_ENGINE:-stub}
+              case "${INPUT_TURNIP:-true}" in
+                  true) turnip=true ;;
+                  false) turnip=false ;;
+                  *) echo "::error::input turnip must be true or false, got '${INPUT_TURNIP}'"; exit 1 ;;
+              esac
+          fi
+          case "$mode" in
+              stub|full) ;;
+              *) echo "::error::input engine must be stub or full, got '$mode'"; exit 1 ;;
+          esac
+          if [ "$mode" = full ] && [ -z "${ENGINE_URL}" ]; then
+              {
+                  echo "### android-apk: cannot build the full APK"
+                  echo ""
+                  echo "This run asked for \`engine=full\`, but the \`PROTORE_ENGINE_URL\` repository secret is not set."
+                  echo ""
+                  echo "1. Take \`prototypeenginef.dll\` from your own copy of the game."
+                  echo "2. Upload it somewhere only you can reach and copy a direct HTTPS download link."
+                  echo "3. Repository Settings -> Secrets and variables -> Actions -> New repository secret:"
+                  echo "   - \`PROTORE_ENGINE_URL\` = that link"
+                  echo "   - \`PROTORE_ENGINE_SHA256\` = output of \`sha256sum prototypeenginef.dll\` (optional, recommended)"
+                  echo "4. Re-run this workflow with \`engine=full\`."
+                  echo ""
+                  echo "The DLL is downloaded only onto the ephemeral runner, is never committed or uploaded, and is deleted before the APK artifact is published."
+              } >> "$GITHUB_STEP_SUMMARY"
+              echo "::error::engine=full needs the PROTORE_ENGINE_URL secret (see the run summary for setup steps)"
+              exit 1
+          fi
+          {
+              echo "### android-apk"
+              echo ""
+              echo "- engine: **$mode**"
+              echo "- turnip: **$turnip**"
+              if [ "$mode" = stub ]; then
+                  echo ""
+                  echo "> Stub mode: the artifact validates the build pipeline only. It contains **no game code** and is **not playable**."
+              fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          {
+              echo "mode=$mode"
+              echo "turnip=$turnip"
+          } >> "$GITHUB_OUTPUT"
+          echo "mode=$mode turnip=$turnip"
+
+  deps:
+    name: deps (SDL2, FAudio, DXVK)
+    needs: preflight
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache deps
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: deps/${{ env.ABI }}
+          key: android-apk-deps-${{ env.ABI }}-ndk${{ env.NDK_VERSION }}-meson${{ env.MESON_VERSION }}-${{ hashFiles('android/build-deps.sh', 'android/patches/**') }}
+
+      - name: Tools
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake ninja-build glslang-tools pkg-config python3-pip
+          pip3 install --user --break-system-packages "meson==$MESON_VERSION"
+
+      - name: Android NDK (pinned)
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          [ -x "$SDKMANAGER" ] || { echo "::error::sdkmanager not found at $SDKMANAGER (runner image changed?)"; exit 1; }
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" "ndk;$NDK_VERSION"
+          NDK="$ANDROID_HOME/ndk/$NDK_VERSION"
+          [ -x "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" ] ||
+              { echo "::error::NDK install looks incomplete: $NDK"; exit 1; }
+          echo "ANDROID_NDK_HOME=$NDK" >> "$GITHUB_ENV"
+          "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" --version | head -n 1
+
+      - name: Build deps
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.local/bin:$PATH"
+          android/build-deps.sh "$ABI" "$PWD/deps-src" "$PWD/deps/$ABI"
+
+      - name: Check deps output
+        run: |
+          set -euo pipefail
+          for f in lib/libSDL2.so lib/libFAudio.so lib/libdxvk_d3d9.so include/SDL2/SDL.h include/FAudio.h include/dxvk/d3d9.h; do
+              if [ ! -f "deps/$ABI/$f" ]; then
+                  echo "::error::deps build did not produce deps/$ABI/$f"
+                  find "deps/$ABI" -maxdepth 3 | head -n 100 || true
+                  exit 1
+              fi
+          done
+          find "deps/$ABI" -name '*.so' -exec ls -lh {} +
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-deps-${{ env.ABI }}
+          path: deps/${{ env.ABI }}
+          if-no-files-found: error
+          retention-days: 7
+
+  turnip:
+    name: turnip (Mesa + libadrenotools)
+    needs: preflight
+    if: needs.preflight.outputs.turnip == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache Turnip
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: turnip
+          key: android-apk-turnip-ndk${{ env.NDK_VERSION }}-meson${{ env.MESON_VERSION }}-${{ hashFiles('android/build-turnip.sh') }}
+
+      - name: Tools
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake ninja-build glslang-tools bison flex pkg-config python3-pip
+          pip3 install --user --break-system-packages "meson==$MESON_VERSION" mako pyyaml packaging
+
+      - name: Android NDK (pinned)
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          [ -x "$SDKMANAGER" ] || { echo "::error::sdkmanager not found at $SDKMANAGER (runner image changed?)"; exit 1; }
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" "ndk;$NDK_VERSION"
+          NDK="$ANDROID_HOME/ndk/$NDK_VERSION"
+          [ -x "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" ] ||
+              { echo "::error::NDK install looks incomplete: $NDK"; exit 1; }
+          echo "ANDROID_NDK_HOME=$NDK" >> "$GITHUB_ENV"
+          "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" --version | head -n 1
+
+      - name: Build Turnip
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.local/bin:$PATH"
+          android/build-turnip.sh "$PWD/turnip-src" "$PWD/turnip"
+
+      - name: Check Turnip output
+        run: |
+          set -euo pipefail
+          for f in lib/libvulkan_freedreno.so lib/libadrenotools.a include/adrenotools/driver.h; do
+              if [ ! -f "turnip/$f" ]; then
+                  echo "::error::Turnip build did not produce turnip/$f"
+                  find turnip -maxdepth 3 | head -n 100 || true
+                  exit 1
+              fi
+          done
+          find turnip \( -name '*.so' -o -name '*.a' \) -exec ls -lh {} +
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-turnip-${{ env.ABI }}
+          path: turnip
+          if-no-files-found: error
+          retention-days: 7
+
+  apk:
+    name: APK
+    needs: [preflight, deps, turnip]
+    if: ${{ !cancelled() && needs.deps.result == 'success' && (needs.turnip.result == 'success' || needs.turnip.result == 'skipped') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Android SDK and NDK (pinned)
+        run: |
+          set -euo pipefail
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          [ -x "$SDKMANAGER" ] || { echo "::error::sdkmanager not found at $SDKMANAGER (runner image changed?)"; exit 1; }
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" "platform-tools" "platforms;$ANDROID_PLATFORM" "build-tools;$BUILD_TOOLS_VERSION" "ndk;$NDK_VERSION"
+          [ -f "$ANDROID_HOME/platforms/$ANDROID_PLATFORM/android.jar" ] ||
+              { echo "::error::android.jar missing for $ANDROID_PLATFORM"; exit 1; }
+          [ -x "$ANDROID_HOME/build-tools/$BUILD_TOOLS_VERSION/aapt2" ] ||
+              { echo "::error::build-tools $BUILD_TOOLS_VERSION incomplete"; exit 1; }
+          NDK="$ANDROID_HOME/ndk/$NDK_VERSION"
+          [ -x "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" ] ||
+              { echo "::error::NDK install looks incomplete: $NDK"; exit 1; }
+          echo "ANDROID_NDK_HOME=$NDK" >> "$GITHUB_ENV"
+          java -version
+          "$ANDROID_HOME/build-tools/$BUILD_TOOLS_VERSION/aapt2" version
+
+      - name: Tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends make zip unzip file binutils
+
+      - name: Download deps
+        uses: actions/download-artifact@v4
+        with:
+          name: android-deps-${{ env.ABI }}
+          path: deps/${{ env.ABI }}
+
+      - name: Download Turnip
+        if: needs.preflight.outputs.turnip == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: android-turnip-${{ env.ABI }}
+          path: turnip
+
+      - name: Check downloaded artifacts
+        env:
+          WITH_TURNIP: ${{ needs.preflight.outputs.turnip }}
+        run: |
+          set -euo pipefail
+          for f in "deps/$ABI/lib/libSDL2.so" "deps/$ABI/lib/libFAudio.so" "deps/$ABI/lib/libdxvk_d3d9.so" \
+                   "deps/$ABI/include/SDL2/SDL.h" "deps/$ABI/include/dxvk/d3d9.h"; do
+              [ -f "$f" ] || { echo "::error::missing $f after artifact download"; find deps -maxdepth 4 | head -n 100 || true; exit 1; }
+          done
+          if [ "$WITH_TURNIP" = true ]; then
+              for f in turnip/lib/libvulkan_freedreno.so turnip/lib/libadrenotools.a; do
+                  [ -f "$f" ] || { echo "::error::missing $f after artifact download"; find turnip -maxdepth 3 | head -n 100 || true; exit 1; }
+              done
+          fi
+
+      - name: SDL2 Java sources (same tag as android/build-deps.sh)
+        run: |
+          set -euo pipefail
+          SDL2_TAG=$(sed -n 's/^SDL2_TAG=//p' android/build-deps.sh)
+          [ -n "$SDL2_TAG" ] || { echo "::error::could not read SDL2_TAG from android/build-deps.sh"; exit 1; }
+          git clone -q --depth 1 --branch "$SDL2_TAG" https://github.com/libsdl-org/SDL.git "$RUNNER_TEMP/SDL2"
+          [ -d "$RUNNER_TEMP/SDL2/android-project/app/src/main/java/org/libsdl/app" ] ||
+              { echo "::error::SDL2 $SDL2_TAG has no Android Java sources where expected"; exit 1; }
+          echo "SDL_SRC=$RUNNER_TEMP/SDL2" >> "$GITHUB_ENV"
+          echo "SDL2 Java sources: $SDL2_TAG"
+
+      - name: Engine code (stub, no game code)
+        if: needs.preflight.outputs.mode == 'stub'
+        run: |
+          set -euo pipefail
+          python3 tools/recomp/make_stub.py build/recomp/native
+          test -f build/recomp/native/table.c
+
+      - name: Python for the recompiler
+        if: needs.preflight.outputs.mode == 'full'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Recompiler dependencies
+        if: needs.preflight.outputs.mode == 'full'
+        run: pip install "capstone>=5,<6" "pefile>=2023.2.7"
+
+      - name: Download the engine DLL (your own copy, via secret)
+        if: needs.preflight.outputs.mode == 'full'
+        env:
+          ENGINE_URL: ${{ secrets.PROTORE_ENGINE_URL }}
+          ENGINE_SHA256: ${{ secrets.PROTORE_ENGINE_SHA256 }}
+        run: |
+          set -euo pipefail
+          # Never echo ENGINE_URL: it can carry credentials. GitHub masks the secret value in logs.
+          mkdir -p "$RUNNER_TEMP/engine"
+          DLL="$RUNNER_TEMP/engine/prototypeenginef.dll"
+          curl -fL --retry 3 --retry-delay 5 -o "$DLL" "$ENGINE_URL"
+          ls -lh "$DLL"
+          if [ -n "${ENGINE_SHA256}" ]; then
+              echo "$(tr '[:upper:]' '[:lower:]' <<<"$ENGINE_SHA256")  $DLL" | sha256sum -c -
+          else
+              echo "::warning::PROTORE_ENGINE_SHA256 is not set; the DLL is only sanity-checked as a 32-bit PE"
+              sha256sum "$DLL"
+          fi
+          ENGINE_DLL="$DLL" python3 - <<'PY'
+          import os
+          import sys
+
+          import pefile
+
+          path = os.environ["ENGINE_DLL"]
+          pe = pefile.PE(path, fast_load=True)
+          machine = pe.FILE_HEADER.Machine
+          if machine != 0x14C:
+              sys.exit(f"::error::{path} is not a 32-bit x86 PE (Machine=0x{machine:04x}); wrong file?")
+          print(f"engine DLL ok: Machine=0x{machine:04x}, "
+                f"{pe.FILE_HEADER.NumberOfSections} sections, {os.path.getsize(path)} bytes")
+          PY
+
+      - name: Recompile the engine
+        if: needs.preflight.outputs.mode == 'full'
+        run: |
+          set -euo pipefail
+          export PROTORE_ENGINE="$RUNNER_TEMP/engine/prototypeenginef.dll"
+          python3 tools/recomp/data_entries.py
+          python3 tools/recomp/recomp.py --functions all --base 0x58000000 \
+              --out build/recomp/native --split 400 2>&1 | tee "$RUNNER_TEMP/recomp.log"
+          # The engine is documented to recompile completely (README.md); anything else would ship traps.
+          if ! grep -q '; 0 unsupported instructions' "$RUNNER_TEMP/recomp.log"; then
+              grep 'unsupported instructions' "$RUNNER_TEMP/recomp.log" || true
+              echo "::error::recomp.py reported unsupported instructions (or no summary); refusing to package a broken APK"
+              exit 1
+          fi
+          test -f build/recomp/native/table.c
+          echo "generated files: $(find build/recomp/native -name 'part_*.c' | wc -l) parts + table.c"
+
+      - name: Build libmain.so
+        run: |
+          set -euo pipefail
+          make -C src/native PLATFORM=android ABI="$ABI" -j"$(nproc)" \
+              NDK="$ANDROID_NDK_HOME" \
+              DEPS="$PWD/deps/$ABI" \
+              TURNIP="$PWD/turnip" \
+              RECOMP_DIR="$PWD/build/recomp/native"
+          test -f "build/android/$ABI/libmain.so"
+          ls -lh "build/android/$ABI/libmain.so"
+          file "build/android/$ABI/libmain.so"
+
+      - name: Package the APK
+        run: |
+          set -euo pipefail
+          export BUILD_TOOLS="$ANDROID_HOME/build-tools/$BUILD_TOOLS_VERSION"
+          export PLATFORM_JAR="$ANDROID_HOME/platforms/$ANDROID_PLATFORM/android.jar"
+          export DEPS_ROOT="$PWD/deps"
+          export TURNIP_ROOT="$PWD/turnip"
+          export KEYSTORE="$RUNNER_TEMP/debug.keystore"   # created by build-apk.sh when missing
+          android/build-apk.sh "$ABI"
+
+      - name: Verify the APK
+        env:
+          EXPECT_TURNIP: ${{ needs.preflight.outputs.turnip == 'true' && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          BUILD_TOOLS="$ANDROID_HOME/build-tools/$BUILD_TOOLS_VERSION" \
+              android/verify-apk.sh build/apk/prototype.apk "$ABI"
+
+      - name: Prepare the artifact
+        env:
+          MODE: ${{ needs.preflight.outputs.mode }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          if [ "$MODE" = full ]; then
+              name="prototype-$ABI.apk"
+          else
+              name="prototype-CI-STUB-not-playable-$ABI.apk"
+          fi
+          cp build/apk/prototype.apk "dist/$name"
+          (cd dist && sha256sum "$name" > "$name.sha256")
+          ls -lh dist
+          sha=$(cut -d ' ' -f 1 "dist/$name.sha256")
+          size=$(du -h "dist/$name" | cut -f 1)
+          {
+              echo ""
+              echo "### APK artifact"
+              echo ""
+              echo "| file | size | sha256 |"
+              echo "|---|---|---|"
+              echo "| \`$name\` | $size | \`$sha\` |"
+              if [ "$MODE" = stub ]; then
+                  echo ""
+                  echo "> Stub APK: pipeline check only, no game code inside, not playable."
+              fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Delete the engine DLL and generated code from the runner
+        if: ${{ always() && needs.preflight.outputs.mode == 'full' }}
+        run: rm -rf "$RUNNER_TEMP/engine" "$RUNNER_TEMP/recomp.log" build/recomp
+
+      - name: Upload the APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: prototype-apk-${{ needs.preflight.outputs.mode }}-${{ env.ABI }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
